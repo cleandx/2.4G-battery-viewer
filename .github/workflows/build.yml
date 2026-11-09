@@ -1,0 +1,41 @@
+name: build-windows-exe
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装打包依赖
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: 生成图标
+        run: python make_icons.py
+
+      - name: 打包 exe
+        run: python build_exe.py
+
+      - name: 上传产物（手动触发时）
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/*.zip
+
+      - name: 发布到 Release（打 tag 时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
