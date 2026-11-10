@@ -16,6 +16,9 @@ tray_config.json
 devices.json
 devices.json.tmp
 
+# 电量历史记录（本机使用数据，不进仓库）
+battery_history.csv
+
 # 编辑器 / 系统
 .vscode/
 .idea/

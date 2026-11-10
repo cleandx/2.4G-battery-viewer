@@ -1974,7 +1974,8 @@ def build_ui(start_minimal: bool = False):
              "notice_until": 0.0, "theme_key": pal_key, "readings": None,
              "pal": pal, "minimal": False, "minis": [], "mini_anchor": None,
              "settings_win": None, "vframe": None, "vlast": None,
-             "vphoto": None, "vlast_glass": 0.0, "wall_on": False}
+             "vphoto": None, "vlast_glass": 0.0, "wall_on": False,
+             "low_flag": {}}
     # Tkinter 不是线程安全的：后台线程只往队列里放结果，主线程统一取出来处理
     results: "queue.Queue[tuple]" = queue.Queue()
 
@@ -2407,6 +2408,19 @@ def build_ui(start_minimal: bool = False):
     v_ambient = tk.StringVar(
         value=_AMBIENT_LABEL_OF.get(str(cfg.get("ambient") or "none"), "无"))
 
+    LOWBAT_CHOICES = [(0, "关"), (10, "10%"), (15, "15%"), (20, "20%"),
+                      (30, "30%")]
+    _LOWBAT_LABEL_OF = dict(LOWBAT_CHOICES)
+
+    def _lowbat_label() -> str:
+        try:
+            v = int(cfg.get("low_battery") or 0)
+        except Exception:
+            v = 20
+        return _LOWBAT_LABEL_OF.get(v, f"{v}%")
+
+    v_lowbat = tk.StringVar(value=_lowbat_label())
+
     PETAL_SHAPE = [(0.00, -1.00), (0.55, -0.35), (0.62, 0.30),
                    (0.22, 0.95), (-0.22, 0.95), (-0.62, 0.30),
                    (-0.55, -0.35)]
@@ -2526,6 +2540,17 @@ def build_ui(start_minimal: bool = False):
         tc.save_config(cfg)
         _ambient_build()
 
+    def on_lowbat(_event=None) -> None:
+        label = v_lowbat.get()
+        val = next((k for k, l in LOWBAT_CHOICES if l == label), 0)
+        cfg["low_battery"] = val
+        tc.save_config(cfg)
+        state["low_flag"].clear()          # 换阈值后重新允许提醒
+        if val:
+            notify(f"低电量提醒已设为 {val}%")
+        else:
+            notify("低电量提醒已关闭")
+
     # ---- 设备（管理收进设置窗口的「设备」页）----
     def on_devices_changed():
         rebuild_cards()
@@ -2596,6 +2621,78 @@ def build_ui(start_minimal: bool = False):
         _wall_job["id"] = root.after(120, lambda: (_draw_wall(), _refresh_card_bgs()))
 
     # ---- 刷新逻辑 ----
+    # ---- 低电量提醒 + 电量历史 ----
+    HISTORY_PATH = os.path.join(tc.BASE_DIR, "battery_history.csv")
+
+    def _balloon(title: str, text: str) -> None:
+        """借托盘图标弹一条 Windows 系统通知（NIM_MODIFY + NIF_INFO）。"""
+        try:
+            hwnd = tc.tray_hwnd()
+            if not hwnd:
+                return
+            import tray_app as ta
+            nid = ta.NOTIFYICONDATAW()
+            nid.cbSize = ctypes.sizeof(ta.NOTIFYICONDATAW)
+            nid.hWnd = ctypes.c_void_p(hwnd)
+            nid.uID = ta.TRAY_ICONS[0][0]
+            nid.uFlags = ta.NIF_INFO
+            nid.dwInfoFlags = ta.NIIF_INFO
+            nid.szInfoTitle = title[:63]
+            nid.szInfo = text[:255]
+            ta.SHELL32.Shell_NotifyIconW(ta.NIM_MODIFY, ctypes.byref(nid))
+        except Exception:
+            pass
+
+    def _is_charging(r) -> bool:
+        return bool(getattr(r, "charging", False)
+                    or "充电" in (getattr(r, "status", "") or ""))
+
+    def _check_low_battery(readings: list) -> None:
+        """低于阈值弹通知；带迟滞（恢复到 阈值+5% 或开始充电后才会再次提醒）。"""
+        thr = int(cfg.get("low_battery") or 0)
+        if thr <= 0:
+            state["low_flag"].clear()
+            return
+        flags = state.setdefault("low_flag", {})
+        seen = set()
+        for r in readings:
+            if not r.ok:
+                continue
+            seen.add(r.title)
+            charging = _is_charging(r)
+            if not charging and r.level is not None and r.level <= thr:
+                if not flags.get(r.title):
+                    flags[r.title] = True
+                    _balloon("电量低提醒", f"{r.title} 电量 {r.level}%，记得充电")
+                    notify(f"⚠ {r.title} 电量低：{r.level}%（提醒阈值 {thr}%）", 10)
+            elif charging or r.level is None or r.level >= thr + 5:
+                flags.pop(r.title, None)
+        for t in list(flags):
+            if t not in seen:
+                flags.pop(t, None)
+
+    def _history_append(readings: list) -> None:
+        """把一轮读数追加到本地 CSV（电量曲线的数据源，3MB 自动轮转）。"""
+        try:
+            rows = [f"{time.strftime('%Y-%m-%dT%H:%M:%S')},{r.title},{r.level},"
+                    f"{1 if _is_charging(r) else 0},{r.voltage_mv or ''}"
+                    for r in readings if r.ok]
+            if not rows:
+                return
+            header = "time,title,level,charging,voltage_mv\n"
+            new = not os.path.isfile(HISTORY_PATH)
+            with open(HISTORY_PATH, "a", encoding="utf-8") as f:
+                if new:
+                    f.write(header)
+                f.write("\n".join(rows) + "\n")
+            if os.path.getsize(HISTORY_PATH) > 3_000_000:
+                with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+                    f.write(header + "".join(lines[-40000:]))
+        except Exception:
+            pass
+
     def apply(readings: list):
         nonlocal start_minimal
         if start_minimal and readings:
@@ -2615,6 +2712,8 @@ def build_ui(start_minimal: bool = False):
                     m.update(r, state["pal"])
         ok = sum(1 for r in readings if r.ok)
         total = len(readings)
+        _check_low_battery(readings)
+        _history_append(readings)
         if not (state.get("notice") and time.time() < state.get("notice_until", 0)):
             set_foot(foot_text())
         state["busy"] = False
@@ -2888,7 +2987,7 @@ def build_ui(start_minimal: bool = False):
         content = ttk.Frame(win, style="Set.TFrame", padding=(18, 14, 18, 14))
         content.pack(side="left", fill="both", expand=True)
 
-        pages = ["外观", "设备", "刷新", "启动与托盘", "关于"]
+        pages = ["外观", "设备", "趋势", "刷新", "启动与托盘", "关于"]
         nav_btns: dict = {}
         page_host: dict = {}
 
@@ -2989,6 +3088,133 @@ def build_ui(start_minimal: bool = False):
         def page_devices():
             build_device_page(content, pal, on_devices_changed)[1]()
 
+        def page_trend():
+            """电量趋势页：读本地 CSV 画曲线（多设备叠加，充电段绿色）。"""
+            import datetime
+            page = ttk.Frame(content, style="SetPage.TFrame")
+            page.pack(fill="both", expand=True)
+            box = section(page, "电量趋势")
+            range_state = {"hours": 24}
+
+            bar = ttk.Frame(box, style="SetCard.TFrame")
+            bar.pack(fill="x")
+            ttk.Label(bar, text="范围", style="SetSub.TLabel").pack(side="left")
+            range_btns: dict = {}
+
+            legend = ttk.Frame(box, style="SetCard.TFrame")
+            legend.pack(fill="x", pady=(8, 0))
+            chart = tk.Canvas(box, bg=pal["bg"], highlightthickness=0, bd=0,
+                              height=300)
+            chart.pack(fill="x", pady=(8, 0))
+            ttk.Label(page, text="数据自动记录在本地 battery_history.csv（约 3MB 自动轮转）；"
+                                 "绿色段 = 充电中",
+                      style="SetSubBg.TLabel").pack(anchor="w")
+
+            def set_range(hours: int) -> None:
+                range_state["hours"] = hours
+                for hh, b in range_btns.items():
+                    b.configure(style="Accent.TButton" if hh == hours
+                                else "TButton")
+                draw()
+
+            def draw() -> None:
+                for w in legend.winfo_children():
+                    w.destroy()
+                chart.delete("all")
+                w = max(360, chart.winfo_width() or 560)
+                h = 300
+                ml, mr, mt, mb = 40, 14, 12, 26
+                pw, ph = w - ml - mr, h - mt - mb
+                # 坐标轴
+                chart.create_line(ml, mt, ml, mt + ph, fill=pal["panel2"])
+                chart.create_line(ml, mt + ph, ml + pw, mt + ph,
+                                  fill=pal["panel2"])
+                for v in (0, 25, 50, 75, 100):
+                    y = mt + ph - ph * v / 100.0
+                    chart.create_text(ml - 6, y, text=f"{v}", anchor="e",
+                                      fill=pal["muted"], font=("Segoe UI", 8))
+                now = time.time()
+                window = range_state["hours"] * 3600.0
+                # 读历史
+                series: dict = {}
+                try:
+                    with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+                        next(f, None)
+                        for ln in f:
+                            parts = ln.strip().split(",")
+                            if len(parts) < 4:
+                                continue
+                            try:
+                                t = time.mktime(time.strptime(
+                                    parts[0], "%Y-%m-%dT%H:%M:%S"))
+                                lv = int(parts[2])
+                                ch = parts[3] == "1"
+                            except Exception:
+                                continue
+                            if now - t > window:
+                                continue
+                            series.setdefault(parts[1], []).append((t, lv, ch))
+                except OSError:
+                    pass
+                if not series:
+                    chart.create_text(ml + pw / 2, mt + ph / 2,
+                                      text="还没有历史数据 —— 用一会儿再来看",
+                                      fill=pal["muted"],
+                                      font=("Microsoft YaHei UI", 10))
+                    return
+                palette = ["#4f8cff", "#f5a623", "#b18cff", "#ff7eb6",
+                           "#3ddc84", "#54c7ec"]
+                for di, title in enumerate(sorted(series)):
+                    pts = sorted(series[title])
+                    color = palette[di % len(palette)]
+                    # 降采样：点数超过画布宽度就按像素分桶取平均
+                    if len(pts) > pw:
+                        buckets: dict = {}
+                        t0 = now - window
+                        for t, lv, ch in pts:
+                            k = int((t - t0) / window * pw)
+                            buckets.setdefault(k, []).append((lv, ch))
+                        pts = [(now - window + (k + 0.5) / pw * window,
+                                sum(v[0] for v in vals) // len(vals),
+                                vals[-1][1])
+                               for k, vals in sorted(buckets.items())]
+                    xy = []
+                    for t, lv, ch in pts:
+                        x = ml + (t - (now - window)) / window * pw
+                        y = mt + ph - ph * max(0, min(100, lv)) / 100.0
+                        xy.append((x, y, ch))
+                    for i in range(1, len(xy)):
+                        x0, y0, _ = xy[i - 1]
+                        x1, y1, c1 = xy[i]
+                        chart.create_line(x0, y0, x1, y1, width=2,
+                                          fill="#3ddc84" if c1 else color)
+                    if xy:
+                        r = 2.5
+                        xe, ye, _ = xy[-1]
+                        chart.create_oval(xe - r, ye - r, xe + r, ye + r,
+                                          fill=color, outline="")
+                    last = pts[-1]
+                    ttk.Label(legend, text=f"● {title}  最近 {last[1]}%",
+                              style="SetSub.TLabel",
+                              foreground=color).pack(side="left", padx=(0, 18))
+                # X 轴时间刻度
+                for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+                    t = now - window * (1.0 - frac)
+                    label = (datetime.datetime.fromtimestamp(t).strftime("%m-%d")
+                             if window > 86400 else
+                             datetime.datetime.fromtimestamp(t).strftime("%H:%M"))
+                    chart.create_text(ml + frac * pw, mt + ph + 12, text=label,
+                                      fill=pal["muted"], font=("Segoe UI", 8))
+
+            for hh, label in ((24, "24 小时"), (24 * 7, "7 天"),
+                              (24 * 30, "30 天")):
+                b = ttk.Button(bar, text=label, style="TButton",
+                               command=lambda h=hh: set_range(h))
+                b.pack(side="left", padx=(8, 0))
+                range_btns[hh] = b
+            set_range(24)
+            page.after(150, draw)          # 等布局拿到真实宽度再画一次
+
         def page_refresh():
             page = ttk.Frame(content, style="SetPage.TFrame")
             page.pack(fill="both", expand=True)
@@ -3006,6 +3232,16 @@ def build_ui(start_minimal: bool = False):
                                         else "自动刷新：关"),
                                   command=lambda: on_auto())
             btn_auto.pack(side="left")
+            row_lb = ttk.Frame(box, style="SetCard.TFrame")
+            row_lb.pack(fill="x", pady=(10, 0))
+            ttk.Label(row_lb, text="低电量提醒", style="SetSub.TLabel").pack(side="left")
+            cb_lb = ttk.Combobox(row_lb, textvariable=v_lowbat, width=8,
+                                 state="readonly",
+                                 values=[label for _, label in LOWBAT_CHOICES])
+            cb_lb.pack(side="left", padx=(8, 16))
+            cb_lb.bind("<<ComboboxSelected>>", on_lowbat)
+            ttk.Label(row_lb, text="低于阈值弹系统通知（一次低电只提醒一次，充电即恢复）",
+                      style="SetSub.TLabel").pack(side="left")
             ttk.Label(page, text="窗口关闭后会隐藏到托盘继续刷新；托盘退出才真正结束。",
                       style="SetSubBg.TLabel").pack(anchor="w")
             win._btn_auto = btn_auto
@@ -3050,8 +3286,8 @@ def build_ui(start_minimal: bool = False):
                 ttk.Label(page, text=line, style="SetSubBg.TLabel").pack(anchor="w")
 
         build_page = {"外观": page_look, "设备": page_devices,
-                      "刷新": page_refresh, "启动与托盘": page_boot,
-                      "关于": page_about}
+                      "趋势": page_trend, "刷新": page_refresh,
+                      "启动与托盘": page_boot, "关于": page_about}
 
         for name in pages:
             b = ttk.Button(nav, text=name, style="Nav.TButton",

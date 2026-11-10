@@ -19,7 +19,7 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "dist")
 EXE_NAME = "2.4G设备电量.exe"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 ZIP_NAME = f"2.4G设备电量-v{VERSION}-win64.zip"
 
 

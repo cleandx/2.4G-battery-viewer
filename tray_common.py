@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "bg_dim": 0.45,        # 背景压暗强度 0..0.9
     "bg_blur": 6.0,        # 背景模糊半径 0..20
     "ambient": "none",     # 氛围粒子：none 无 / petals 花瓣 / rain 雨滴
+    "low_battery": 20,     # 低电量提醒阈值（百分比，0 = 关闭）
 }
 
 INTERVAL_CHOICES = [(30, "30 秒"), (60, "1 分钟"), (120, "2 分钟"),
