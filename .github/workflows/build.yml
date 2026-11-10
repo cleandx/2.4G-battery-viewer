@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
 
       - name: 安装打包依赖
-        run: python -m pip install --upgrade pip pyinstaller
+        run: python -m pip install --upgrade pip pyinstaller pillow
 
       - name: 生成图标
         run: python make_icons.py
