@@ -89,6 +89,13 @@ python my_battery.py
 - 只扫描不添加：`python my_battery.py --scan`；扫描并全部加入：`python my_battery.py --add`
 - 想摸新设备的协议：`python app.py` —— 完整调试版，可枚举接口、转储 Feature Report、探测 Report ID、手动标定
 
+### 低电量提醒 · 电量趋势
+
+- **低电量提醒**：任何设备低于阈值（默认 20%）弹 Windows 系统通知，一次低电只提醒一次
+  （充电或回升后自动复位）；设置 → 刷新里可调 关 / 10% / 15% / 20% / 30%。
+- **电量趋势**（设置 → 趋势）：多设备电量曲线，24 小时 / 7 天 / 30 天切换，充电时段绿色高亮。
+  数据自动记录在本地 `battery_history.csv`（约 3MB 自动轮转），不联网不上传。
+
 ### 极简模式：两块毛玻璃小浮窗
 
 ![极简模式](assets/screenshot-minimal.png)
